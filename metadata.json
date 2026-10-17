@@ -1,6 +1,8 @@
 {
   "name": "EchoOpen Voice AI - End-to-End Voice Assistant",
   "description": "Production-grade Voice AI assistant built with open-weight models (Faster-Whisper, Qwen/Llama, Kokoro/Piper) featuring low-latency streaming, VAD, barge-in interruptions, and English & Hindi support.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "microphone"
+  ],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

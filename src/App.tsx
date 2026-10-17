@@ -1,26 +1,16 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  ActiveTab,
-  Header,
-} from './components/Header';
-import { AudioVisualizer } from './components/AudioVisualizer';
-import { ConversationPanel } from './components/ConversationPanel';
-import { VoiceControls } from './components/VoiceControls';
-import { LatencyProfiler } from './components/LatencyProfiler';
-import { ArchitectureView } from './components/ArchitectureView';
-import { BenchmarksView } from './components/BenchmarksView';
-import { CodeRepositoryView } from './components/CodeRepositoryView';
-import { DemoGuideModal } from './components/DemoGuideModal';
-import { SettingsModal } from './components/SettingsModal';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   AssistantState,
   ChatMessage,
   Language,
-  LatencyMetrics,
   PipelineConfig,
 } from './types';
 import { audioService } from './utils/audio';
 import { voiceAssistantService } from './services/voiceAssistant';
+import { Navbar } from './components/Navbar';
+import { VoiceAura } from './components/VoiceAura';
+import { ConversationStream } from './components/ConversationStream';
+import { VoiceActionBar } from './components/VoiceActionBar';
 
 const DEFAULT_CONFIG: PipelineConfig = {
   language: 'en',
@@ -29,44 +19,52 @@ const DEFAULT_CONFIG: PipelineConfig = {
   ttsModel: 'kokoro-82m',
   ttsVoice: 'af_heart',
   vadSensitivity: 0.05,
-  silenceThresholdMs: 1000,
+  silenceThresholdMs: 800,
   bargeInEnabled: true,
   streamingTtsEnabled: true,
   systemPrompt:
-    'You are EchoOpen, an intelligent, concise, and helpful voice assistant built entirely on open-weight models. Keep your spoken responses brief (1-3 sentences), natural, and clear. Avoid formatting symbols.',
+    'You are Echo, a thoughtful, direct voice companion. Respond in 1 to 2 conversational, natural sentences for speech output. Avoid formatting symbols.',
   localOllamaUrl: 'http://localhost:11434',
   localBackendUrl: 'http://localhost:8000',
   useLocalBackend: false,
-  speechRate: 1.05,
+  speechRate: 1.15,
   speechPitch: 1.0,
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('studio');
   const [language, setLanguage] = useState<Language>('en');
   const [assistantState, setAssistantState] = useState<AssistantState>('idle');
+  const stateRef = useRef<AssistantState>('idle');
+
+  const updateState = useCallback((newState: AssistantState) => {
+    stateRef.current = newState;
+    setAssistantState(newState);
+  }, []);
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [currentStreamingText, setCurrentStreamingText] = useState<string>('');
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  const [latestMetrics, setLatestMetrics] = useState<LatencyMetrics | null>(null);
   const [config, setConfig] = useState<PipelineConfig>(DEFAULT_CONFIG);
 
   // Audio & VAD realtime state
   const [vadEnergyDb, setVadEnergyDb] = useState<number>(-100);
   const [silenceCountdownPct, setSilenceCountdownPct] = useState<number>(0);
-
-  // Modals
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-  const [isDemoGuideOpen, setIsDemoGuideOpen] = useState<boolean>(false);
+  const [liveTranscript, setLiveTranscript] = useState<string>('');
+  const [micError, setMicError] = useState<string | null>(null);
 
   // Refs for audio loops & recognition
   const recognitionRef = useRef<any>(null);
   const vadLoopRef = useRef<number | null>(null);
-  const silenceStartRef = useRef<number | null>(null);
-  const speechDetectedRef = useRef<boolean>(false);
+  const noiseFloorRef = useRef<number | null>(null);
+  const lastVocalTimestampRef = useRef<number>(0);
+  const hasSpokenRef = useRef<boolean>(false);
   const currentTranscriptRef = useRef<string>('');
+  const latestInterimRef = useRef<string>('');
+  const latestIsFinalRef = useRef<boolean>(false);
+  const isListeningRef = useRef<boolean>(false);
+  const speechStartTimeRef = useRef<number | null>(null);
 
-  // Update config language when top language changes
+  // Language switch handler
   const handleLanguageChange = (lang: Language) => {
     setLanguage(lang);
     setConfig((prev) => ({
@@ -82,8 +80,8 @@ export default function App() {
     audioService.stopPlayback();
     setIsStreaming(false);
     setCurrentStreamingText('');
-    setAssistantState('listening');
-  }, []);
+    updateState('listening');
+  }, [updateState]);
 
   // Speech Recognition initialization
   const initSpeechRecognition = useCallback(() => {
@@ -91,41 +89,78 @@ export default function App() {
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecClass) {
-      console.warn('SpeechRecognition API not available in this browser');
       return null;
     }
 
-    const recognition = new SpeechRecClass();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = language === 'hi' ? 'hi-IN' : 'en-US';
+    try {
+      const recognition = new SpeechRecClass();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = language === 'hi' ? 'hi-IN' : 'en-US';
 
-    recognition.onresult = (event: any) => {
-      let interim = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          currentTranscriptRef.current += event.results[i][0].transcript + ' ';
-        } else {
-          interim += event.results[i][0].transcript;
+      recognition.onresult = (event: any) => {
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            currentTranscriptRef.current += event.results[i][0].transcript + ' ';
+            latestInterimRef.current = '';
+            latestIsFinalRef.current = true;
+          } else {
+            interim += event.results[i][0].transcript;
+            latestInterimRef.current = interim;
+            latestIsFinalRef.current = false;
+          }
         }
-      }
-      if (interim || currentTranscriptRef.current) {
-        speechDetectedRef.current = true;
-      }
-    };
+        const combined = (currentTranscriptRef.current + ' ' + interim).trim();
+        setLiveTranscript(combined);
+        if (combined) {
+          hasSpokenRef.current = true;
+          lastVocalTimestampRef.current = Date.now();
+          if (!speechStartTimeRef.current) {
+            speechStartTimeRef.current = Date.now();
+          }
+          if (stateRef.current === 'listening') {
+            updateState('vad_detecting');
+          }
+        }
+      };
 
-    recognition.onerror = (e: any) => {
-      console.warn('SpeechRecognition warning:', e.error);
-    };
+      recognition.onerror = (e: any) => {
+        if (e.error === 'not-allowed') {
+          setMicError('Microphone permission blocked. Please allow mic access in your browser bar.');
+        } else if (e.error === 'audio-capture') {
+          setMicError('No microphone detected.');
+        }
+      };
 
-    return recognition;
-  }, [language]);
+      recognition.onend = () => {
+        if (
+          isListeningRef.current &&
+          stateRef.current !== 'stt_processing' &&
+          stateRef.current !== 'llm_thinking' &&
+          stateRef.current !== 'tts_speaking'
+        ) {
+          try {
+            recognition.start();
+          } catch {}
+        }
+      };
 
-  // Execute an assistant turn
+      return recognition;
+    } catch {
+      return null;
+    }
+  }, [language, updateState]);
+
+  // Execute an assistant turn (conversational reply + streaming speech playback)
   const executeTurn = async (userText: string) => {
-    if (!userText.trim()) return;
+    if (!userText.trim()) {
+      updateState(isListeningRef.current ? 'listening' : 'idle');
+      return;
+    }
 
-    // 1. Add user turn
+    updateState('stt_processing');
+
     const userMsg: ChatMessage = {
       id: `usr_${Date.now()}`,
       role: 'user',
@@ -134,11 +169,13 @@ export default function App() {
     };
 
     setMessages((prev) => [...prev, userMsg]);
-    setAssistantState('llm_thinking');
+    updateState('llm_thinking');
     setIsStreaming(true);
     setCurrentStreamingText('');
 
     try {
+      let streamingSpeechStarted = false;
+
       const response = await voiceAssistantService.processTurn(
         userText,
         messages,
@@ -146,24 +183,20 @@ export default function App() {
         (token) => {
           setCurrentStreamingText((prev) => prev + token);
         },
-        async (sentence) => {
-          // Streaming sentence playback
-          setAssistantState('tts_speaking');
-          await audioService.playSpeech(
-            sentence,
-            config.language,
-            config.speechRate,
-            config.speechPitch,
-            () => setAssistantState('tts_speaking'),
-            () => {
-              if (assistantState === 'tts_speaking') {
-                setAssistantState('idle');
-              }
+        (sentence) => {
+          if (config.streamingTtsEnabled && sentence.trim()) {
+            if (!streamingSpeechStarted) {
+              streamingSpeechStarted = true;
+              updateState('tts_speaking');
             }
-          );
-        },
-        (metrics) => {
-          setLatestMetrics(metrics);
+            audioService.enqueueSentence(
+              sentence,
+              config.language,
+              config.speechRate,
+              config.speechPitch,
+              () => updateState('tts_speaking')
+            );
+          }
         }
       );
 
@@ -171,79 +204,184 @@ export default function App() {
       setIsStreaming(false);
       setCurrentStreamingText('');
 
-      // If sentence streaming was not already spoken, play full response
-      if (!response.interrupted) {
-        setAssistantState('tts_speaking');
+      // Wait until assistant finishes speaking all queued sentences
+      if (streamingSpeechStarted) {
+        await audioService.waitForQueueComplete();
+      } else if (!response.interrupted && response.content) {
+        updateState('tts_speaking');
         await audioService.playSpeech(
           response.content,
           config.language,
           config.speechRate,
           config.speechPitch,
-          () => setAssistantState('tts_speaking'),
-          () => setAssistantState('idle')
+          () => updateState('tts_speaking')
         );
+      }
+
+      // Smoothly return to listening if session was active
+      if (isListeningRef.current) {
+        try {
+          await audioService.initMic();
+          audioService.startSpeechCapture();
+          if (recognitionRef.current) {
+            try { recognitionRef.current.start(); } catch {}
+          }
+          updateState('listening');
+        } catch {
+          updateState('idle');
+        }
       } else {
-        setAssistantState('idle');
+        updateState('idle');
       }
     } catch (err) {
-      console.error('Error during turn execution:', err);
+      console.error('Turn execution note:', err);
       setIsStreaming(false);
-      setAssistantState('idle');
+      updateState(isListeningRef.current ? 'listening' : 'idle');
     }
   };
 
-  // Real-time VAD monitoring loop
-  const startVadMonitoring = useCallback(() => {
-    const thresholdDb = -46; // Noise threshold
-    const silenceTimeout = config.silenceThresholdMs;
+  // Commit current speech turn
+  const commitSpeechTurn = useCallback(async (forcedText?: string) => {
+    const currentState = stateRef.current;
+    if (
+      currentState === 'stt_processing' ||
+      currentState === 'llm_thinking' ||
+      currentState === 'tts_speaking'
+    ) {
+      return;
+    }
 
-    const vadTick = () => {
+    updateState('stt_processing');
+    setSilenceCountdownPct(0);
+    hasSpokenRef.current = false;
+    lastVocalTimestampRef.current = 0;
+    speechStartTimeRef.current = null;
+    latestIsFinalRef.current = false;
+
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
+
+    let speechText = (forcedText || currentTranscriptRef.current + ' ' + latestInterimRef.current).trim();
+    currentTranscriptRef.current = '';
+    latestInterimRef.current = '';
+    setLiveTranscript('');
+
+    if (speechText) {
+      audioService.stopSpeechCapture();
+      await executeTurn(speechText);
+      return;
+    }
+
+    const capturedBlob = await audioService.stopSpeechCapture();
+
+    if (!speechText && capturedBlob && capturedBlob.size > 1500) {
+      try {
+        const base64 = await audioService.blobToBase64(capturedBlob);
+        const res = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64: base64,
+            mimeType: capturedBlob.type || 'audio/webm',
+            language: config.language,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.text && data.text.trim()) {
+            speechText = data.text.trim();
+          }
+        }
+      } catch (err) {
+        console.warn('Transcription request note:', err);
+      }
+    }
+
+    if (speechText) {
+      await executeTurn(speechText);
+    } else {
+      if (isListeningRef.current) {
+        audioService.startSpeechCapture();
+        if (recognitionRef.current) {
+          try { recognitionRef.current.start(); } catch {}
+        }
+        updateState('listening');
+      } else {
+        updateState('idle');
+      }
+    }
+  }, [config.language, updateState]);
+
+  // Adaptive VAD loop
+  const startVadMonitoring = useCallback(() => {
+    const silenceTimeout = config.silenceThresholdMs || 800;
+
+    const vadTick = async () => {
       const db = audioService.getEnergyDb();
       setVadEnergyDb(db);
+      const currentState = stateRef.current;
 
-      // Check for user speaking while assistant is speaking (Barge-in detection!)
-      if (assistantState === 'tts_speaking' && config.bargeInEnabled && db > thresholdDb + 4) {
-        handleBargeIn();
+      if (db > -95) {
+        if (noiseFloorRef.current === null) {
+          noiseFloorRef.current = db;
+        } else {
+          noiseFloorRef.current = noiseFloorRef.current * 0.97 + db * 0.03;
+        }
       }
 
-      if (assistantState === 'listening' || assistantState === 'vad_detecting') {
-        const hasVocalEnergy = db > thresholdDb;
+      const ambient = noiseFloorRef.current ?? -50;
+      const thresholdDb = Math.min(-34, Math.max(-52, ambient + 7));
 
-        if (hasVocalEnergy) {
-          // User is actively vocalizing
-          speechDetectedRef.current = true;
-          silenceStartRef.current = null;
+      if (currentState === 'tts_speaking' && config.bargeInEnabled && db > thresholdDb + 4) {
+        handleBargeIn();
+        vadLoopRef.current = requestAnimationFrame(vadTick);
+        return;
+      }
+
+      if (currentState !== 'listening' && currentState !== 'vad_detecting') {
+        vadLoopRef.current = requestAnimationFrame(vadTick);
+        return;
+      }
+
+      const hasVocalEnergy = db > thresholdDb;
+      const hasLiveWords = Boolean(
+        currentTranscriptRef.current.trim() || latestInterimRef.current.trim()
+      );
+
+      if (hasVocalEnergy) {
+        lastVocalTimestampRef.current = Date.now();
+        if (!speechStartTimeRef.current) {
+          speechStartTimeRef.current = Date.now();
+        }
+        const energyDuration = Date.now() - speechStartTimeRef.current;
+        if (hasLiveWords || energyDuration > 280) {
+          hasSpokenRef.current = true;
           setSilenceCountdownPct(0);
-          setAssistantState('vad_detecting');
-        } else {
-          // Below threshold
-          if (speechDetectedRef.current) {
-            // User had started speaking, now in silence gap
-            const now = performance.now();
-            if (!silenceStartRef.current) {
-              silenceStartRef.current = now;
-            }
+          if (stateRef.current !== 'vad_detecting') {
+            updateState('vad_detecting');
+          }
+        }
+      } else {
+        if (hasSpokenRef.current && (hasLiveWords || (speechStartTimeRef.current && (Date.now() - speechStartTimeRef.current > 350)))) {
+          const now = Date.now();
+          const elapsedSilence = now - lastVocalTimestampRef.current;
+          const effectiveTimeout = latestIsFinalRef.current && hasLiveWords
+            ? Math.min(silenceTimeout, 650)
+            : silenceTimeout;
+          const progress = Math.min(100, (elapsedSilence / effectiveTimeout) * 100);
+          setSilenceCountdownPct(progress);
 
-            const elapsedSilence = now - silenceStartRef.current;
-            const progress = Math.min(100, (elapsedSilence / silenceTimeout) * 100);
-            setSilenceCountdownPct(progress);
-
-            if (elapsedSilence >= silenceTimeout) {
-              // Silence threshold reached! Commit user speech turn!
-              speechDetectedRef.current = false;
-              silenceStartRef.current = null;
-              setSilenceCountdownPct(0);
-
-              const finalSpeech = currentTranscriptRef.current.trim();
-              currentTranscriptRef.current = '';
-
-              if (finalSpeech) {
-                setAssistantState('stt_processing');
-                executeTurn(finalSpeech);
-              } else {
-                setAssistantState('listening');
-              }
-            }
+          if (elapsedSilence >= effectiveTimeout) {
+            await commitSpeechTurn();
+          }
+        } else if (!hasLiveWords) {
+          speechStartTimeRef.current = null;
+          hasSpokenRef.current = false;
+          setSilenceCountdownPct(0);
+          if (stateRef.current === 'vad_detecting') {
+            updateState('listening');
           }
         }
       }
@@ -252,32 +390,42 @@ export default function App() {
     };
 
     vadLoopRef.current = requestAnimationFrame(vadTick);
-  }, [assistantState, config.bargeInEnabled, config.silenceThresholdMs, handleBargeIn]);
+  }, [config.bargeInEnabled, config.silenceThresholdMs, commitSpeechTurn, handleBargeIn, updateState]);
 
-  // Start microphone and speech pipeline
+  // Start / stop microphone session
   const handleToggleMic = async () => {
-    if (assistantState === 'listening' || assistantState === 'vad_detecting') {
-      // Stop listening
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {}
+    if (stateRef.current === 'listening' || stateRef.current === 'vad_detecting') {
+      if (hasSpokenRef.current || liveTranscript.trim()) {
+        await commitSpeechTurn();
+      } else {
+        isListeningRef.current = false;
+        if (recognitionRef.current) {
+          try { recognitionRef.current.stop(); } catch {}
+          recognitionRef.current = null;
+        }
+        audioService.stopMic();
+        if (vadLoopRef.current) {
+          cancelAnimationFrame(vadLoopRef.current);
+          vadLoopRef.current = null;
+        }
+        updateState('idle');
+        hasSpokenRef.current = false;
+        speechStartTimeRef.current = null;
+        setSilenceCountdownPct(0);
+        setLiveTranscript('');
       }
-      audioService.stopMic();
-      if (vadLoopRef.current) {
-        cancelAnimationFrame(vadLoopRef.current);
-      }
-      setAssistantState('idle');
-      speechDetectedRef.current = false;
-      silenceStartRef.current = null;
-      setSilenceCountdownPct(0);
     } else {
-      // Start listening
+      setMicError(null);
       try {
         await audioService.initMic();
+        audioService.startSpeechCapture();
         currentTranscriptRef.current = '';
-        speechDetectedRef.current = false;
-        silenceStartRef.current = null;
+        latestInterimRef.current = '';
+        setLiveTranscript('');
+        hasSpokenRef.current = false;
+        speechStartTimeRef.current = null;
+        lastVocalTimestampRef.current = Date.now();
+        isListeningRef.current = true;
 
         const rec = initSpeechRecognition();
         if (rec) {
@@ -287,26 +435,26 @@ export default function App() {
           } catch {}
         }
 
-        setAssistantState('listening');
+        updateState('listening');
         startVadMonitoring();
-      } catch (err) {
-        console.warn('Microphone permission or access error:', err);
-        // Fallback: stay idle, user can type or use sample prompts
-        setAssistantState('idle');
+      } catch (err: any) {
+        setMicError(err.message || 'Microphone access denied or hardware not found.');
+        updateState('idle');
+        isListeningRef.current = false;
       }
     }
   };
 
   // Replay speech audio from previous turn
   const handleReplayAudio = (text: string, lang: Language) => {
-    setAssistantState('tts_speaking');
+    updateState('tts_speaking');
     audioService.playSpeech(
       text,
       lang,
       config.speechRate,
       config.speechPitch,
-      () => setAssistantState('tts_speaking'),
-      () => setAssistantState('idle')
+      () => updateState('tts_speaking'),
+      () => updateState(isListeningRef.current ? 'listening' : 'idle')
     );
   };
 
@@ -317,9 +465,24 @@ export default function App() {
     setMessages([]);
     setCurrentStreamingText('');
     setIsStreaming(false);
-    setLatestMetrics(null);
-    setAssistantState('idle');
+    updateState('idle');
+    isListeningRef.current = false;
   };
+
+  // Keyboard shortcut: spacebar toggles mic when not typing in input
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeTag = document.activeElement?.tagName.toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea') return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleToggleMic();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleToggleMic]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -333,90 +496,62 @@ export default function App() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-zinc-100/70 text-zinc-900 flex flex-col font-sans">
-      {/* Navigation Header */}
-      <Header
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
+    <div className="min-h-screen bg-[#fafaf9] text-zinc-900 flex flex-col font-sans selection:bg-zinc-200">
+      {/* Clean Navbar */}
+      <Navbar
         language={language}
         onLanguageChange={handleLanguageChange}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        onOpenDemoGuide={() => setIsDemoGuideOpen(true)}
-        isBackendConnected={config.useLocalBackend}
+        onClearHistory={handleClearHistory}
+        hasMessages={messages.length > 0}
       />
 
-      {/* Main Workspace Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
-        {/* TAB 1: VOICE STUDIO (Main Conversational Playground) */}
-        {activeTab === 'studio' && (
-          <div className="space-y-6">
-            {/* Top Row: Visualizer & Real-time State */}
-            <AudioVisualizer
-              state={assistantState}
-              vadEnergyDb={vadEnergyDb}
-              vadThresholdDb={-46}
-              isSpeaking={assistantState === 'tts_speaking'}
-              silenceCountdownPct={silenceCountdownPct}
-            />
+      {/* Dismissible Mic Error Banner */}
+      {micError && (
+        <div className="bg-rose-50 border-b border-rose-200 px-4 py-2 text-xs text-rose-800 flex items-center justify-between">
+          <span>{micError}</span>
+          <button
+            onClick={() => setMicError(null)}
+            className="text-rose-600 hover:text-rose-900 font-bold ml-2"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
-            {/* Middle Row: Conversation Panel & Latency Profiler */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              <div className="lg:col-span-7">
-                <ConversationPanel
-                  messages={messages}
-                  currentStreamingText={currentStreamingText}
-                  isStreaming={isStreaming}
-                  onReplayAudio={handleReplayAudio}
-                  onClearHistory={handleClearHistory}
-                  language={language}
-                />
-              </div>
+      {/* Main Experience: Minimalist Voice Aura + Conversation Stream */}
+      <main className="flex-1 max-w-2xl w-full mx-auto flex flex-col overflow-hidden">
+        {/* Serene Voice Aura at the top */}
+        <VoiceAura
+          state={assistantState}
+          vadEnergyDb={vadEnergyDb}
+          silenceCountdownPct={silenceCountdownPct}
+          liveTranscript={liveTranscript}
+          isSpeaking={assistantState === 'tts_speaking'}
+          onInterrupt={handleBargeIn}
+        />
 
-              <div className="lg:col-span-5">
-                <LatencyProfiler metrics={latestMetrics} />
-              </div>
-            </div>
-
-            {/* Bottom Row: Voice & VAD Controls */}
-            <VoiceControls
-              state={assistantState}
-              onToggleMic={handleToggleMic}
-              onBargeIn={handleBargeIn}
-              onSubmitText={executeTurn}
-              config={config}
-              onConfigChange={(updated) => setConfig((prev) => ({ ...prev, ...updated }))}
-              language={language}
-            />
-          </div>
-        )}
-
-        {/* TAB 2: ARCHITECTURE & PIPELINE */}
-        {activeTab === 'architecture' && <ArchitectureView />}
-
-        {/* TAB 3: BENCHMARKS & HARDWARE */}
-        {activeTab === 'benchmarks' && <BenchmarksView />}
-
-        {/* TAB 4: SOURCE CODE & EXPORT */}
-        {activeTab === 'code' && <CodeRepositoryView />}
+        {/* Conversation Stream */}
+        <ConversationStream
+          messages={messages}
+          currentStreamingText={currentStreamingText}
+          isStreaming={isStreaming}
+          language={language}
+          onReplayAudio={handleReplayAudio}
+          onSelectPrompt={(text) => executeTurn(text)}
+        />
       </main>
 
-      {/* Modals */}
-      <DemoGuideModal
-        isOpen={isDemoGuideOpen}
-        onClose={() => setIsDemoGuideOpen(false)}
-        onSelectPrompt={(text, lang) => {
-          handleLanguageChange(lang);
-          setActiveTab('studio');
-          executeTurn(text);
-        }}
-      />
-
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        config={config}
-        onSaveConfig={setConfig}
-      />
+      {/* Bottom Floating Action Bar */}
+      <footer className="sticky bottom-0 z-10">
+        <VoiceActionBar
+          state={assistantState}
+          onToggleMic={handleToggleMic}
+          onCommitTurn={() => commitSpeechTurn()}
+          onBargeIn={handleBargeIn}
+          onSubmitText={executeTurn}
+          language={language}
+        />
+      </footer>
     </div>
   );
 }

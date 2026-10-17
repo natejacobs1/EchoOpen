@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { ExternalLink, AlertCircle } from 'lucide-react';
 import { AssistantState } from '../types';
 import { audioService } from '../utils/audio';
 
@@ -8,6 +9,10 @@ interface AudioVisualizerProps {
   vadThresholdDb: number;
   isSpeaking: boolean;
   silenceCountdownPct?: number; // 0 to 100
+  liveTranscript?: string;
+  micError?: string | null;
+  onOpenDiagnostics?: () => void;
+  onClearError?: () => void;
 }
 
 export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
@@ -16,6 +21,10 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
   vadThresholdDb,
   isSpeaking,
   silenceCountdownPct = 0,
+  liveTranscript,
+  micError,
+  onOpenDiagnostics,
+  onClearError,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationFrameRef = useRef<number | null>(null);
@@ -219,6 +228,19 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
           </div>
         )}
 
+        {/* Live Recognized Speech Subtitle (Voice to Text in action!) */}
+        {liveTranscript && (
+          <div className="absolute top-3 left-4 right-20 max-w-lg bg-zinc-900/90 backdrop-blur-xs px-3 py-1.5 rounded-lg border border-indigo-500/40 text-xs shadow-lg animate-in fade-in">
+            <div className="flex items-center gap-1.5 text-[10px] text-indigo-400 font-mono mb-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-ping" />
+              <span>LIVE SPEECH RECOGNITION (STT):</span>
+            </div>
+            <p className="text-zinc-100 font-medium truncate">
+              "{liveTranscript}"
+            </p>
+          </div>
+        )}
+
         {/* Energy meter in the corner */}
         <div className="absolute bottom-2 right-3 flex items-center gap-2 text-[11px] font-mono text-zinc-400 bg-zinc-900/80 px-2 py-0.5 rounded border border-zinc-800">
           <span>dB: {vadEnergyDb > -90 ? Math.round(vadEnergyDb) : '-∞'}</span>
@@ -226,6 +248,25 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
           <span>Threshold: {vadThresholdDb}dB</span>
         </div>
       </div>
+
+      {/* Clean microphone notice banner if permission is blocked */}
+      {micError && (
+        <div className="px-4 py-2.5 bg-rose-950/90 border-t border-rose-800 flex items-center justify-between text-xs text-rose-200 gap-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{micError}</span>
+          </div>
+          {onClearError && (
+            <button
+              onClick={onClearError}
+              className="text-rose-400 hover:text-white p-1 text-sm font-bold"
+              title="Dismiss"
+            >
+              ×
+            </button>
+          )}
+        </div>
+      )}
 
       {/* State Banner */}
       <div className="px-4 py-2.5 bg-zinc-900 flex items-center justify-between border-t border-zinc-800 text-xs">
@@ -236,12 +277,24 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
           <span className="text-zinc-400 hidden sm:inline">{stateInfo.desc}</span>
         </div>
 
-        {/* Barge-in badge indicator */}
-        {state === 'tts_speaking' && (
-          <div className="flex items-center gap-1 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">
-            <span>Barge-in ready</span>
-          </div>
-        )}
+        {/* Actions: Diagnostics and Barge-in */}
+        <div className="flex items-center gap-2">
+          {onOpenDiagnostics && (
+            <button
+              onClick={onOpenDiagnostics}
+              className="text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors hidden sm:block"
+            >
+              Test Mic & STT
+            </button>
+          )}
+
+          {/* Barge-in badge indicator */}
+          {state === 'tts_speaking' && (
+            <div className="flex items-center gap-1 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">
+              <span>Barge-in ready</span>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

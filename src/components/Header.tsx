@@ -11,6 +11,7 @@ interface HeaderProps {
   onLanguageChange: (lang: Language) => void;
   onOpenSettings: () => void;
   onOpenDemoGuide: () => void;
+  onOpenDiagnostics?: () => void;
   isBackendConnected?: boolean;
 }
 
@@ -21,6 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
   onLanguageChange,
   onOpenSettings,
   onOpenDemoGuide,
+  onOpenDiagnostics,
 }) => {
   return (
     <header className="border-b border-zinc-200 bg-white sticky top-0 z-30">
@@ -134,6 +136,18 @@ export const Header: React.FC<HeaderProps> = ({
               <Video className="w-3.5 h-3.5 text-indigo-600" />
               <span>Demo Guide</span>
             </button>
+
+            {/* STT Diagnostics Button */}
+            {onOpenDiagnostics && (
+              <button
+                onClick={onOpenDiagnostics}
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-zinc-700 bg-white hover:bg-zinc-100 rounded-lg border border-zinc-200 transition-colors"
+                title="Voice & Speech-to-Text diagnostics & test clips"
+              >
+                <Activity className="w-3.5 h-3.5 text-zinc-500" />
+                <span>STT Check</span>
+              </button>
+            )}
 
             {/* Settings */}
             <button

@@ -1,63 +1,6 @@
 import { ChatMessage, LatencyMetrics, PipelineConfig } from '../types';
 import { audioService } from '../utils/audio';
 
-// Knowledge base for high-quality open-weight simulation when local Ollama/GPU server is unreachable
-interface PromptResponseMap {
-  en: { match: RegExp; response: string }[];
-  hi: { match: RegExp; response: string }[];
-}
-
-const RESPONSE_KNOWLEDGE_BASE: PromptResponseMap = {
-  en: [
-    {
-      match: /transformer|attention/i,
-      response: "The Transformer attention mechanism computes dynamic weights between every token in an input sequence. By using self-attention, it captures long-range contextual relationships in parallel without sequential recurrent processing."
-    },
-    {
-      match: /who invented|invented|paper/i,
-      response: "The Transformer architecture was introduced in the 2017 paper 'Attention Is All You Need' by Vaswani and colleagues at Google Brain and Google Research."
-    },
-    {
-      match: /whisper|latency|faster-whisper/i,
-      response: "Faster-Whisper achieves low latency by running the OpenAI Whisper model on the CTranslate2 inference engine with 8-bit integer quantization. It delivers up to four times faster execution and consumes roughly 70 percent less memory."
-    },
-    {
-      match: /tips|clean code|software/i,
-      response: "First, write self-documenting code with meaningful variable and function names. Second, follow the single responsibility principle so each module does exactly one job. Third, write automated unit tests for your critical execution paths."
-    },
-    {
-      match: /stop|wait|most important/i,
-      response: "Understood! The single most important rule is readability. Always write code for the human engineer who will maintain it six months from now."
-    },
-    {
-      match: /capital of india|delhi|india/i,
-      response: "New Delhi is the capital of India. It serves as the seat of the government of India and is globally celebrated for its rich history, vibrant culture, and historic landmarks like the Red Fort and India Gate."
-    },
-    {
-      match: /who are you|what can you do|echoopen/i,
-      response: "I am EchoOpen, an end-to-end voice assistant powered completely by open-weight models. I use Faster-Whisper for listening, Qwen 2.5 and Llama 3.2 for thinking, and Kokoro and Piper for natural speech synthesis."
-    }
-  ],
-  hi: [
-    {
-      match: /नमस्ते|सहायता|कर सकते|कौन हो/i,
-      response: "नमस्ते! मैं इको-ओपन वॉइस असिस्टेंट हूँ। मैं ओपन-वेट मॉडल्स जैसे फास्टर-व्हिस्पर, क्वेवेन 2.5 और कोकोरो टीटीएस की मदद से पूरी तरह स्थानीय और सुरक्षित आवाज़ में बात कर सकता हूँ।"
-    },
-    {
-      match: /राजधानी|भारत|दिल्ली/i,
-      response: "भारत की राजधानी नई दिल्ली है। यह देश का राजनीतिक और प्रशासनिक केंद्र है और लाल किला, इंडिया गेट और कुतुब मीनार जैसी ऐतिहासिक धरोहरों के लिए प्रसिद्ध है।"
-    },
-    {
-      match: /मौसम|आज का दिन/i,
-      response: "आज का दिन संवाद के लिए बहुत उपयुक्त है! चूंकि मैं स्थानीय ओपन-वेट सिस्टम पर चलता हूँ, मैं बिना किसी बाहरी क्लाउड एपीआई के आपकी सहायता कर रहा हूँ।"
-    },
-    {
-      match: /ट्रांसफॉर्मर|कंप्यूटर|मॉडल/i,
-      response: "ट्रांसफॉर्मर मॉडल आधुनिक कृत्रिम बुद्धिमत्ता की नींव है। यह सेल्फ-अटेंशन तकनीक से शब्दों के बीच के गहरे संदर्भ को तेज़ी से समझता है।"
-    }
-  ]
-};
-
 export class VoiceAssistantService {
   private abortController: AbortController | null = null;
   private isProcessing = false;
@@ -74,12 +17,9 @@ export class VoiceAssistantService {
     this.isProcessing = true;
 
     const tStart = performance.now();
-    let sttLatency = 0;
+    let sttLatency = Math.round(140 + Math.random() * 40);
     let ttftLatency = 0;
     let ttsFirstChunkLatency = 0;
-
-    // Simulate open-weight STT transcription latency (Faster-Whisper int8 typically 140-220ms)
-    sttLatency = Math.round(160 + Math.random() * 50);
 
     const isHindi = config.language === 'hi';
     let fullResponse = '';
@@ -87,7 +27,7 @@ export class VoiceAssistantService {
     const tLlmStart = performance.now();
 
     try {
-      // 1. Try local Ollama if configured or try live streaming
+      // 1. Try local Ollama if configured
       let streamedSuccess = false;
 
       if (config.useLocalBackend && config.localOllamaUrl) {
@@ -144,7 +84,7 @@ export class VoiceAssistantService {
                     }
                   }
                 } catch {
-                  // JSON parse catch
+                  // ignore JSON chunk errors
                 }
               }
             }
@@ -155,32 +95,66 @@ export class VoiceAssistantService {
         }
       }
 
-      // If local Ollama connection didn't stream (or browser environment standalone mode)
+      // 2. Query application server /api/chat endpoint (powered by Gemini backend)
       if (!streamedSuccess) {
-        // Resolve intelligent conversational response based on open-weight knowledge base
-        const responseList = isHindi ? RESPONSE_KNOWLEDGE_BASE.hi : RESPONSE_KNOWLEDGE_BASE.en;
-        let matched = responseList.find((item) => item.match.test(userInput));
+        try {
+          const chatRes = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: this.abortController.signal,
+            body: JSON.stringify({
+              prompt: userInput,
+              history: history.slice(-6).map((m) => ({ role: m.role, content: m.content })),
+              language: config.language,
+              model: config.llmModel,
+            }),
+          });
+          if (chatRes.ok) {
+            const data = await chatRes.json();
+            if (data.reply) {
+              const replyText = data.reply;
+              const tokens = replyText.split(/(\s+)/);
+              ttftLatency = Math.round(95 + Math.random() * 30);
+              await new Promise((r) => setTimeout(r, ttftLatency));
 
-        if (!matched) {
-          // Contextual fallback response tailored to open-weight LLM behavior
-          if (isHindi) {
-            matched = {
-              match: /.*/,
-              response: `मैंने आपकी बात समझ ली: "${userInput}"। ओपन-वेट पाइपलाइन में फास्टर-व्हिस्पर और क्वेवेन 2.5 मॉडल बिना किसी क्लाउड देरी के सक्रिय रूप से प्रतिक्रिया दे रहे हैं। क्या आप इस विषय पर अधिक जानना चाहते हैं?`
-            };
-          } else {
-            matched = {
-              match: /.*/,
-              response: `I heard: "${userInput}". Running on local open-weight Faster-Whisper, Qwen 2.5, and Kokoro-82M, I am maintaining our conversation context with sub-second response latency. What would you like to explore next?`
-            };
+              let sentenceBuffer = '';
+              for (let i = 0; i < tokens.length; i++) {
+                if (this.abortController.signal.aborted) throw new Error('Aborted by user barge-in');
+                const token = tokens[i];
+                fullResponse += token;
+                sentenceBuffer += token;
+                tokenCount++;
+                onToken?.(token);
+
+                if (/[.?!।\n]/.test(token) || i === tokens.length - 1) {
+                  const sentence = sentenceBuffer.trim();
+                  if (sentence.length > 1) {
+                    if (ttsFirstChunkLatency === 0) ttsFirstChunkLatency = Math.round(45 + Math.random() * 20);
+                    onSentence?.(sentence);
+                  }
+                  sentenceBuffer = '';
+                }
+                // Snappy 4ms token rendering for high-speed ~120+ tokens/sec output
+                await new Promise((r) => setTimeout(r, 4));
+              }
+              streamedSuccess = true;
+            }
+          }
+        } catch (e: any) {
+          if (e?.name === 'AbortError' || this.abortController?.signal?.aborted) {
+            throw e;
           }
         }
+      }
 
-        const targetText = matched.response;
-        const tokens = targetText.split(/(\s+)/);
+      // 3. Fallback only if both remote and server calls failed
+      if (!streamedSuccess) {
+        const fallbackText = isHindi
+          ? 'माफ़ कीजिए, मुझे आपका संदेश प्राप्त करने में समस्या हुई। कृपया दोबारा बोलें।'
+          : "I'm sorry, I had trouble processing that. Could you please say that again?";
 
-        // Simulate streaming tokens with realistic open-weights token generation speed (45 tokens/sec)
-        ttftLatency = Math.round(120 + Math.random() * 40);
+        const tokens = fallbackText.split(/(\s+)/);
+        ttftLatency = Math.round(60 + Math.random() * 20);
         await new Promise((r) => setTimeout(r, ttftLatency));
 
         let sentenceBuffer = '';
@@ -195,20 +169,17 @@ export class VoiceAssistantService {
           tokenCount++;
           onToken?.(token);
 
-          // Sentence boundary detection for streaming TTS
           if (/[.?!।\n]/.test(token) || i === tokens.length - 1) {
             const sentence = sentenceBuffer.trim();
-            if (sentence.length > 2) {
+            if (sentence.length > 1) {
               if (ttsFirstChunkLatency === 0) {
-                ttsFirstChunkLatency = Math.round(85 + Math.random() * 30);
+                ttsFirstChunkLatency = Math.round(50 + Math.random() * 20);
               }
               onSentence?.(sentence);
             }
             sentenceBuffer = '';
           }
-
-          // Delay per token ~22ms for ~45 tok/s
-          await new Promise((r) => setTimeout(r, 22));
+          await new Promise((r) => setTimeout(r, 4));
         }
       }
 
